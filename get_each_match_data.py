@@ -313,4 +313,4 @@ class GetEachMatchOdds:
 
 if __name__ == '__main__':
     g = GetEachMatchOdds('product')
-    g.get_each_match_odds(200, 37925, 50000)
+    g.get_each_match_odds(200, 40562, 50000)

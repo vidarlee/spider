@@ -2,11 +2,13 @@
 
 import configparser
 import db_connecter
+import datetime
 import logging
 import psycopg2
 import Queue
 import re
 import requests
+import signal
 import sys
 import threading
 
@@ -21,12 +23,21 @@ from time import sleep
 class GetHtmlFailed(Exception):
     pass
 
+class GracefulKiller:
+    kill_now = False
+    def __init__(self):
+        signal.signal(signal.SIGINT, self.exit_gracefully)
+        signal.signal(signal.SIGTERM, self.exit_gracefully)
+
+    def exit_gracefully(self,signum, frame):
+        self.kill_now = True
+
 class GetEachMatchOdds:
     defaultEncoding = 'utf-8'
     
     def __init__(self, loglevel, db_config_file, section_name):
-    	self.pool_size = 5
-    	self.min_db_conn_size = self.pool_size - 3
+    	self.pool_size = 2
+    	self.min_db_conn_size = 2
         logging.config.fileConfig('logger_test.conf')
         self.logger = logging.getLogger(loglevel)
         self.config = configparser.ConfigParser()
@@ -186,7 +197,10 @@ class GetEachMatchOdds:
             queue.task_done()
             
     def basic_work(self, group_size, start_offset, end_offset):
-        queue = Queue.Queue()
+    	self.logger.info("Start get matches infomation...")
+    	start_time = datetime.datetime.now()
+        queue = Queue.Queue(maxsize=self.pool_size)
+        killer = GracefulKiller()
         for i in range(self.pool_size):
             t = threading.Thread(target=self.basic_get_match_info_task,name='Task-'+str(i), args=(queue,))
             t.daemon = True
@@ -195,13 +209,25 @@ class GetEachMatchOdds:
         current_offset = start_offset
         headers = {'User-Agent':'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)', 'Referer':'https://developer.mozilla.org/en-US/docs/Web/JavaScript'}
         while(current_offset <= end_offset):
-        	sql_str = 'select id, home_team_score, away_team_score, asia_data_url, euro_data_url from matchs limit %s offset %s'
-        	self.main_db_conn.select_record(sql_str, (group_size, current_offset))
-        	rows = self.main_db_conn.fetchall()
-        	queue.put(rows)
-        	current_offset += group_size
+            sql_str = 'select id, home_team_score, away_team_score, asia_data_url, euro_data_url from matchs limit %s offset %s'
+            self.main_db_conn.select_record(sql_str, (group_size, current_offset))
+            rows = self.main_db_conn.fetchall()
+            queue.put(rows)
+            
+            if killer.kill_now:
+                self.logger.info("The programing will stop after all task done, and the current offset is: %s", current_offset+group_size)
+                break
+            
+            current_offset += group_size
+        
+        if not killer.kill_now:
+            self.logger.info("Get matches info completed!")
+        
         self.main_db_conn.close()
         queue.join()
+        end_time = datetime.datetime.now()
+        last_time = end_time - start_time
+        self.logger.info("Get matches infomation finished, the program lasted for %s seconds", last_time.total_seconds())
 
     def parse_euro_new_html(self, response):
         _html = html.fromstring(response.text)
@@ -345,4 +371,4 @@ class GetEachMatchOdds:
 
 if __name__ == '__main__':
     g = GetEachMatchOdds('product', 'db.conf', 'test')
-    g.basic_work(5, 0, 25)
+    g.basic_work(2, 0, 150)
